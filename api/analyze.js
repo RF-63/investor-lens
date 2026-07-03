@@ -31,27 +31,58 @@ RULES:
 - It is acceptable for a lens to have more criticism than praise, or vice versa. Do not force balance.
 - Do not invent figures not present in the text.
 
-Return ONLY valid JSON (no markdown, no preamble) matching exactly this shape:
-{
-  "overallSummary": "2-4 sentence executive summary of the investment case and the biggest tension in the report.",
-  "lenses": [
-    {
-      "name": "Generalist Equity Investor",
-      "praise": [ { "point": "string", "quote": "verbatim quote from report" } ],
-      "criticism": [ { "point": "string", "quote": "verbatim quote from report" } ]
+Provide your analysis by calling the "submit_analysis" tool. Include all three lenses in this order: "Generalist Equity Investor", "ESG / Sustainability Critic", "Activist / Short-Seller".`;
+
+// The tool defines the exact structure Claude must return. Because the API
+// enforces this schema, the result is always well-formed data — no more
+// hand-formatting that can break on tricky punctuation in quotes.
+const ANALYSIS_TOOL = {
+  name: "submit_analysis",
+  description: "Submit the structured investor critique of the report.",
+  input_schema: {
+    type: "object",
+    properties: {
+      overallSummary: {
+        type: "string",
+        description: "2-3 sentence executive summary of the investment case and the biggest tension in the report."
+      },
+      lenses: {
+        type: "array",
+        description: "The three investor lenses, each with praise and criticism.",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Name of the investor lens." },
+            praise: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  point: { type: "string", description: "1-2 sentence point of praise." },
+                  quote: { type: "string", description: "Short verbatim quote from the report supporting this point." }
+                },
+                required: ["point", "quote"]
+              }
+            },
+            criticism: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  point: { type: "string", description: "1-2 sentence point of criticism." },
+                  quote: { type: "string", description: "Short verbatim quote from the report supporting this point." }
+                },
+                required: ["point", "quote"]
+              }
+            }
+          },
+          required: ["name", "praise", "criticism"]
+        }
+      }
     },
-    {
-      "name": "ESG / Sustainability Critic",
-      "praise": [ ... ],
-      "criticism": [ ... ]
-    },
-    {
-      "name": "Activist / Short-Seller",
-      "praise": [ ... ],
-      "criticism": [ ... ]
-    }
-  ]
-}`;
+    required: ["overallSummary", "lenses"]
+  }
+};
 
 // Tries hard to pull a valid JSON object out of the model's text.
 function tryParseJson(text) {
@@ -113,6 +144,8 @@ export default async function handler(req, res) {
         model: MODEL,
         max_tokens: MAX_OUTPUT_TOKENS,
         system: SYSTEM_PROMPT,
+        tools: [ANALYSIS_TOOL],
+        tool_choice: { type: "tool", name: "submit_analysis" },
         messages: [
           { role: "user", content: userContent }
         ]
@@ -122,27 +155,25 @@ export default async function handler(req, res) {
     if (!response.ok) {
       const detail = await response.text();
       return res.status(502).json({
-        error: "The AI service returned an error: " + detail.slice(0, 400)
+        error: "[v5] The AI service returned an error: " + detail.slice(0, 400)
       });
     }
 
     const data = await response.json();
-    const raw = (data.content && data.content[0] && data.content[0].text) || "";
     const stopReason = data.stop_reason;
 
-    // Claude is instructed to return pure JSON. Strip any stray code fences,
-    // then tryParseJson pulls out the {...} object even if there's stray text. // v4-16k
-    let cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+    // With structured output, Claude replies via a "tool_use" block whose
+    // "input" is already a clean object matching our schema. // v5-tool
+    const toolBlock = (data.content || []).find((c) => c.type === "tool_use");
+    const parsed = toolBlock ? toolBlock.input : null;
 
-    let parsed = tryParseJson(cleaned);
     if (!parsed) {
-      // If the model ran out of room mid-answer, the JSON is unterminated.
       if (stopReason === "max_tokens") {
         return res.status(502).json({
-          error: "[v4] This report is exceptionally long and the critique still exceeded the limit. Try a somewhat shorter report for now."
+          error: "[v5] This report is exceptionally long and the critique exceeded the limit. Try a somewhat shorter report for now."
         });
       }
-      return res.status(502).json({ error: "[v4] The AI response could not be parsed. Please try again." });
+      return res.status(502).json({ error: "[v5] The AI did not return a structured result. Please try again." });
     }
 
     parsed.truncated = truncated;
