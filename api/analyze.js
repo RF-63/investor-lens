@@ -6,7 +6,7 @@
 
 // ---- Settings you can safely change later -------------------------------
 const MODEL = "claude-sonnet-5";      // swap to "claude-opus-4-8" for deeper (pricier) analysis
-const MAX_OUTPUT_TOKENS = 8000;       // length of the critique Claude can produce (safe for all current models)
+const MAX_OUTPUT_TOKENS = 16000;      // length of the critique Claude can produce
 const MAX_INPUT_CHARS = 300000;       // ~75k tokens; protects you from runaway cost on huge reports
 // -------------------------------------------------------------------------
 
@@ -131,7 +131,7 @@ export default async function handler(req, res) {
     const stopReason = data.stop_reason;
 
     // Claude is instructed to return pure JSON. Strip any stray code fences,
-    // then tryParseJson pulls out the {...} object even if there's stray text. // no-prefill-v3-capped
+    // then tryParseJson pulls out the {...} object even if there's stray text. // v4-16k
     let cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
 
     let parsed = tryParseJson(cleaned);
@@ -139,10 +139,10 @@ export default async function handler(req, res) {
       // If the model ran out of room mid-answer, the JSON is unterminated.
       if (stopReason === "max_tokens") {
         return res.status(502).json({
-          error: "The report is very long and the analysis was cut off. Try a shorter report, or ask to raise the output limit."
+          error: "[v4] This report is exceptionally long and the critique still exceeded the limit. Try a somewhat shorter report for now."
         });
       }
-      return res.status(502).json({ error: "The AI response could not be parsed. Please try again." });
+      return res.status(502).json({ error: "[v4] The AI response could not be parsed. Please try again." });
     }
 
     parsed.truncated = truncated;
