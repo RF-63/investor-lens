@@ -24,7 +24,9 @@ You reason from three distinct lenses. For EACH lens, produce points of PRAISE a
    An adversarial lens hunting for red flags: aggressive or opaque accounting, deteriorating cash conversion, related-party dealings, weak governance, misaligned incentives, undisclosed risks, and gaps between tone and substance. Draws on behavioral cues that management may be obscuring problems (Kahneman & Tversky on framing and overconfidence).
 
 RULES:
-- Every point MUST include a short verbatim quote (1–2 sentences) from the provided report text that the point responds to. Quote exactly; do not paraphrase inside the quote field. If you genuinely cannot find supporting text for a point, omit that point.
+- Report ONLY the most material points: at most 5 items of praise and at most 5 items of criticism per lens. Prioritize significance over completeness — a few sharp, high-impact points beat many minor ones.
+- Every point MUST include a short verbatim quote from the provided report text that the point responds to. Keep each quote to a single sentence, roughly 30 words maximum; if the relevant passage is longer, quote only the key clause. Quote exactly; do not paraphrase inside the quote field. If you genuinely cannot find supporting text for a point, omit that point.
+- Keep each "point" to 1-2 sentences. Keep "overallSummary" to 2-3 sentences.
 - Be concrete. Prefer "operating margin narrative omits the 220bp decline shown in the segment table" over generic statements.
 - It is acceptable for a lens to have more criticism than praise, or vice versa. Do not force balance.
 - Do not invent figures not present in the text.
@@ -129,7 +131,7 @@ export default async function handler(req, res) {
     const stopReason = data.stop_reason;
 
     // Claude is instructed to return pure JSON. Strip any stray code fences,
-    // then tryParseJson pulls out the {...} object even if there's stray text. // no-prefill-v2
+    // then tryParseJson pulls out the {...} object even if there's stray text. // no-prefill-v3-capped
     let cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
 
     let parsed = tryParseJson(cleaned);
