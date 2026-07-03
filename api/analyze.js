@@ -112,10 +112,7 @@ export default async function handler(req, res) {
         max_tokens: MAX_OUTPUT_TOKENS,
         system: SYSTEM_PROMPT,
         messages: [
-          { role: "user", content: userContent },
-          // Prefill the reply with "{" so Claude must return pure JSON,
-          // with no preamble like "Here is the analysis:".
-          { role: "assistant", content: "{" }
+          { role: "user", content: userContent }
         ]
       })
     });
@@ -131,9 +128,9 @@ export default async function handler(req, res) {
     const raw = (data.content && data.content[0] && data.content[0].text) || "";
     const stopReason = data.stop_reason;
 
-    // We prefilled the assistant turn with "{", so the reply continues the JSON.
-    // Re-attach the "{" and strip any stray code fences just in case.
-    let cleaned = ("{" + raw).replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+    // Claude is instructed to return pure JSON. Strip any stray code fences,
+    // then tryParseJson pulls out the {...} object even if there's stray text. // no-prefill-v2
+    let cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
 
     let parsed = tryParseJson(cleaned);
     if (!parsed) {
