@@ -139,24 +139,67 @@ const ANALYSIS_TOOL = {
   }
 };
 
-// Accepts whatever shape the model used for "lenses" (a list, or an object
-// keyed by lens name) and always returns a clean list of well-formed lenses.
+function tryParse(str) {
+  try { return JSON.parse(str); } catch (e) { return null; }
+}
+
+// Models occasionally hand back a nested structure as a JSON *string* rather
+// than a real list/object. Unwrap that wherever it happens.
+function unwrap(value) {
+  if (typeof value === "string") return tryParse(value);
+  return value;
+}
+
+// Normalize a single praise/criticism entry to { point, quote }.
+function normalizeItem(item) {
+  let it = item;
+  if (typeof it === "string") {
+    const asObject = tryParse(it);
+    if (asObject && typeof asObject === "object") {
+      it = asObject;
+    } else {
+      return { point: it, quote: "" }; // plain sentence, no quote attached
+    }
+  }
+  if (!it || typeof it !== "object") return null;
+  const point = typeof it.point === "string" ? it.point : "";
+  const quote = typeof it.quote === "string" ? it.quote : "";
+  if (!point && !quote) return null;
+  return { point: point, quote: quote };
+}
+
+function normalizeItems(items) {
+  const list = unwrap(items);
+  if (!Array.isArray(list)) return [];
+  return list.map(normalizeItem).filter(Boolean);
+}
+
+// Accepts whatever shape the model used for "lenses" — a list, an object keyed
+// by lens name, or a JSON string of either — and always returns a clean list.
 function normalizeLenses(lenses) {
+  const value = unwrap(lenses);
   let list = [];
-  if (Array.isArray(lenses)) {
-    list = lenses;
-  } else if (lenses && typeof lenses === "object") {
-    list = Object.keys(lenses).map((key) => {
-      const value = lenses[key] || {};
-      return { name: value.name || key, praise: value.praise, criticism: value.criticism };
+
+  if (Array.isArray(value)) {
+    list = value;
+  } else if (value && typeof value === "object") {
+    list = Object.keys(value).map((key) => {
+      const entry = unwrap(value[key]) || {};
+      return {
+        name: (entry && entry.name) || key,
+        praise: entry && entry.praise,
+        criticism: entry && entry.criticism
+      };
     });
   }
+
   return list
+    .map(unwrap)
     .filter((lens) => lens && typeof lens === "object")
     .map((lens) => ({
       name: typeof lens.name === "string" && lens.name ? lens.name : "Stakeholder",
-      praise: Array.isArray(lens.praise) ? lens.praise : [],
-      criticism: Array.isArray(lens.criticism) ? lens.criticism : []
+      praise: normalizeItems(lens.praise),
+      criticism: normalizeItems(lens.criticism)
     }));
 }
 
@@ -264,9 +307,13 @@ export default async function handler(req, res) {
 
     if (!result.lenses.length) {
       // Report exactly what came back, so the cause is never a guess.
+      const raw = parsed.lenses;
+      const shape = Array.isArray(raw) ? "array[" + raw.length + "]" : typeof raw;
+      let sample = "";
+      try { sample = JSON.stringify(raw).slice(0, 220); } catch (e) { sample = "(unserializable)"; }
       return res.status(502).json({
-        error: "[v9] The AI returned no stakeholder lenses. (stop=" + stopReason +
-               "; keys=" + Object.keys(parsed).join("|") + ")"
+        error: "[v10] The AI returned no usable stakeholder lenses. (stop=" + stopReason +
+               "; shape=" + shape + "; sample=" + sample + ")"
       });
     }
 
