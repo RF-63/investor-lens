@@ -61,6 +61,12 @@
   }
   .summary { border-left: 4px solid var(--accent); }
   .lenses { margin-bottom: 18px; }
+  .lensgroup { margin-bottom: 18px; }
+  .gname {
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--accent); margin-bottom: 2px;
+  }
+  .gnote { color: var(--muted); font-size: 12.5px; margin-bottom: 9px; line-height: 1.4; }
   .lensopt {
     display: flex; align-items: flex-start; gap: 10px;
     background: var(--panel-2); border: 1px solid var(--line);
@@ -138,15 +144,26 @@
       const resp = await fetch("/api/analyze");
       const data = await resp.json();
       const lenses = (data && data.lenses) || [];
+      const groups = (data && data.groups) || [];
       if (!lenses.length) throw new Error("no lenses");
-      picker.innerHTML = lenses.map((l) => `
-        <label class="lensopt">
-          <input type="checkbox" value="${escapeHtml(l.id)}" ${DEFAULT_LENSES.includes(l.id) ? "checked" : ""} />
-          <span>
-            <span class="nm">${escapeHtml(l.name)}</span><br>
-            <span class="bl">${escapeHtml(l.blurb || "")}</span>
-          </span>
-        </label>`).join("");
+
+      picker.innerHTML = groups.map((g) => {
+        const inGroup = lenses.filter((l) => l.group === g.id);
+        if (!inGroup.length) return "";
+        return `
+          <div class="lensgroup">
+            <div class="gname">${escapeHtml(g.name)}</div>
+            <div class="gnote">${escapeHtml(g.note || "")}</div>
+            ${inGroup.map((l) => `
+              <label class="lensopt">
+                <input type="checkbox" value="${escapeHtml(l.id)}" ${DEFAULT_LENSES.includes(l.id) ? "checked" : ""} />
+                <span>
+                  <span class="nm">${escapeHtml(l.name)}</span><br>
+                  <span class="bl">${escapeHtml(l.blurb || "")}</span>
+                </span>
+              </label>`).join("")}
+          </div>`;
+      }).join("");
     } catch (e) {
       picker.innerHTML = `<div class="warn">Couldn't load the stakeholder voices. Reload the page to try again.</div>`;
     }
