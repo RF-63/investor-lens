@@ -251,6 +251,51 @@ function unwrap(value) {
   return value;
 }
 
+// Last resort. If the model returned text that is malformed or truncated, pull
+// out whatever individual findings we can still recognise. Our findings are
+// flat objects, so each one is a brace-pair with no nested braces inside.
+function salvageFindings(text) {
+  if (typeof text !== "string") return [];
+  const out = [];
+  const re = /\{[^{}]*"lens"[^{}]*\}/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const obj = tryParse(m[0]);
+    if (obj && obj.lens && obj.point) out.push(obj);
+  }
+  return out;
+}
+
+// Accept every shape the model has actually produced:
+//  - findings as a proper list                     (the happy path)
+//  - findings as a JSON string of a list
+//  - the WHOLE payload (summary + findings) stuffed into findings as a string
+//  - findings as an object keyed by index
+//  - any of the above, truncated or malformed      (-> salvage)
+function coercePayload(parsed) {
+  let summary = typeof parsed.overallSummary === "string" ? parsed.overallSummary : "";
+  let raw = parsed.findings;
+
+  const inner = unwrap(raw);
+  if (Array.isArray(inner)) {
+    raw = inner;
+  } else if (inner && typeof inner === "object") {
+    // The model nested the whole payload inside the findings field.
+    if (!summary && typeof inner.overallSummary === "string") summary = inner.overallSummary;
+    raw = inner.findings !== undefined ? inner.findings : Object.values(inner);
+  }
+
+  let list = unwrap(raw);
+  if (!Array.isArray(list)) list = [];
+
+  if (!list.length) {
+    if (typeof parsed.findings === "string") list = salvageFindings(parsed.findings);
+    else if (typeof raw === "string") list = salvageFindings(raw);
+  }
+
+  return { overallSummary: summary, findings: list };
+}
+
 // Normalize a single praise/criticism entry to { point, quote }.
 function normalizeItem(item) {
   let it = item;
@@ -423,7 +468,7 @@ export default async function handler(req, res) {
     // (often an empty shell). Catch this first and say so plainly.
     if (stopReason === "max_tokens") {
       return res.status(502).json({
-        error: "[v11] The critique ran past the length limit and was cut off. Tick fewer stakeholder voices, or use a shorter report."
+        error: "[v14] The critique ran past the length limit and was cut off. Tick fewer stakeholder voices, or use a shorter report."
       });
     }
 
@@ -431,12 +476,15 @@ export default async function handler(req, res) {
     const parsed = toolBlock ? toolBlock.input : null;
 
     if (!parsed || typeof parsed !== "object") {
-      return res.status(502).json({ error: "[v11] The AI did not return a structured result. Please try again." });
+      return res.status(502).json({ error: "[v14] The AI did not return a structured result. Please try again." });
     }
 
+    // Accepts every shape the model has been observed to produce. // v14-coerce
+    const payload = coercePayload(parsed);
+
     const result = {
-      overallSummary: typeof parsed.overallSummary === "string" ? parsed.overallSummary : "",
-      lenses: groupFindings(parsed.findings, selected),
+      overallSummary: payload.overallSummary,
+      lenses: groupFindings(payload.findings, selected),
       truncated: truncated
     };
 
@@ -447,7 +495,7 @@ export default async function handler(req, res) {
       let sample = "";
       try { sample = JSON.stringify(raw).slice(0, 220); } catch (e) { sample = "(unserializable)"; }
       return res.status(502).json({
-        error: "[v11] The AI returned no usable findings. (stop=" + stopReason +
+        error: "[v14] The AI returned no usable findings. (stop=" + stopReason +
                "; shape=" + shape + "; sample=" + sample + ")"
       });
     }
