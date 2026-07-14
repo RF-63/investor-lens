@@ -86,58 +86,53 @@ RULES:
 - Silence in the report is itself findable: absence of a disclosure a stakeholder would expect is a legitimate criticism, as long as you quote the passage where it should have appeared or where a weaker claim was made instead.
 - Do not invent figures not present in the text.
 
-Provide your analysis by calling the "submit_analysis" tool. Include all ${selected.length} lenses in this order, using exactly these names: ${names}.`;
+Provide your analysis by calling the "submit_analysis" tool.
+
+The tool takes a FLAT list called "findings". Each finding is one point, tagged with which lens makes it and whether it is praise or criticism. Cover all ${selected.length} lenses, using exactly these lens names: ${names}. Emit "findings" as a real list of objects — never as a single block of text.`;
 }
 
-// The tool defines the exact structure Claude must return. Because the API
-// enforces this schema, the result is always well-formed data. // v9-budget
-const ANALYSIS_TOOL = {
-  name: "submit_analysis",
-  description: "Submit the structured stakeholder critique of the report.",
-  input_schema: {
-    type: "object",
-    properties: {
-      overallSummary: {
-        type: "string",
-        description: "2-3 sentence executive summary, noting the sharpest tension between the stakeholder voices."
-      },
-      lenses: {
-        type: "array",
-        description: "The stakeholder lenses, each with praise and criticism.",
-        items: {
-          type: "object",
-          properties: {
-            name: { type: "string", description: "Name of the stakeholder lens." },
-            praise: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  point: { type: "string", description: "1-2 sentence point of praise." },
-                  quote: { type: "string", description: "Short verbatim quote from the report supporting this point." }
-                },
-                required: ["point", "quote"]
-              }
+// The tool defines the structure Claude must return. It is deliberately FLAT:
+// one list of findings, each tagged with its lens. Deeply nested schemas get
+// collapsed into text by the model; flat ones don't. // v11-flat
+function buildTool(selected) {
+  const lensNames = selected.map((l) => l.name);
+  return {
+    name: "submit_analysis",
+    description: "Submit the stakeholder critique of the report as a flat list of findings.",
+    input_schema: {
+      type: "object",
+      properties: {
+        overallSummary: {
+          type: "string",
+          description: "2-3 sentence executive summary, noting the sharpest tension between the stakeholder voices."
+        },
+        findings: {
+          type: "array",
+          description: "A flat list. Each item is ONE point made by ONE stakeholder lens.",
+          items: {
+            type: "object",
+            properties: {
+              lens: {
+                type: "string",
+                enum: lensNames,
+                description: "Which stakeholder lens makes this point."
+              },
+              type: {
+                type: "string",
+                enum: ["praise", "criticism"],
+                description: "Whether this point is praise or criticism."
+              },
+              point: { type: "string", description: "1-2 sentence point." },
+              quote: { type: "string", description: "Short verbatim quote from the report supporting this point." }
             },
-            criticism: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  point: { type: "string", description: "1-2 sentence point of criticism." },
-                  quote: { type: "string", description: "Short verbatim quote from the report supporting this point." }
-                },
-                required: ["point", "quote"]
-              }
-            }
-          },
-          required: ["name", "praise", "criticism"]
+            required: ["lens", "type", "point", "quote"]
+          }
         }
-      }
-    },
-    required: ["overallSummary", "lenses"]
-  }
-};
+      },
+      required: ["overallSummary", "findings"]
+    }
+  };
+}
 
 function tryParse(str) {
   try { return JSON.parse(str); } catch (e) { return null; }
@@ -174,33 +169,49 @@ function normalizeItems(items) {
   return list.map(normalizeItem).filter(Boolean);
 }
 
-// Accepts whatever shape the model used for "lenses" — a list, an object keyed
-// by lens name, or a JSON string of either — and always returns a clean list.
-function normalizeLenses(lenses) {
-  const value = unwrap(lenses);
-  let list = [];
+// Match a lens name loosely, so a small wording drift from the model still
+// lands in the right bucket rather than being discarded.
+function matchLens(name, selected) {
+  if (typeof name !== "string" || !name) return null;
+  const needle = name.trim().toLowerCase();
+  let hit = selected.find((l) => l.name.toLowerCase() === needle);
+  if (hit) return hit;
+  hit = selected.find((l) => l.name.toLowerCase().includes(needle) || needle.includes(l.name.toLowerCase()));
+  if (hit) return hit;
+  // last resort: match on the first distinctive word (e.g. "nature", "equity")
+  const word = needle.split(/[^a-z]+/).filter((w) => w.length > 3)[0];
+  if (word) hit = selected.find((l) => l.name.toLowerCase().includes(word));
+  return hit || null;
+}
 
-  if (Array.isArray(value)) {
-    list = value;
-  } else if (value && typeof value === "object") {
-    list = Object.keys(value).map((key) => {
-      const entry = unwrap(value[key]) || {};
-      return {
-        name: (entry && entry.name) || key,
-        praise: entry && entry.praise,
-        criticism: entry && entry.criticism
-      };
-    });
-  }
+// Turn the flat findings list back into the per-lens shape the page expects.
+// Tolerates findings arriving as a JSON string, and items likewise.
+function groupFindings(findings, selected) {
+  const list = unwrap(findings);
+  const items = Array.isArray(list) ? list : [];
 
-  return list
-    .map(unwrap)
-    .filter((lens) => lens && typeof lens === "object")
-    .map((lens) => ({
-      name: typeof lens.name === "string" && lens.name ? lens.name : "Stakeholder",
-      praise: normalizeItems(lens.praise),
-      criticism: normalizeItems(lens.criticism)
-    }));
+  const buckets = selected.map((l) => ({ name: l.name, praise: [], criticism: [] }));
+  const byName = {};
+  selected.forEach((l, i) => { byName[l.name] = buckets[i]; });
+
+  items.forEach((entry) => {
+    const f = unwrap(entry);
+    if (!f || typeof f !== "object") return;
+
+    const lens = matchLens(f.lens, selected);
+    if (!lens) return;
+
+    const point = typeof f.point === "string" ? f.point.trim() : "";
+    const quote = typeof f.quote === "string" ? f.quote.trim() : "";
+    if (!point) return;
+
+    const isPraise = String(f.type || "").trim().toLowerCase().startsWith("prais");
+    const bucket = byName[lens.name];
+    (isPraise ? bucket.praise : bucket.criticism).push({ point: point, quote: quote });
+  });
+
+  // Drop any lens the model said nothing about at all.
+  return buckets.filter((b) => b.praise.length || b.criticism.length);
 }
 
 export default async function handler(req, res) {
@@ -268,7 +279,7 @@ export default async function handler(req, res) {
         model: MODEL,
         max_tokens: MAX_OUTPUT_TOKENS,
         system: buildSystemPrompt(selected),
-        tools: [ANALYSIS_TOOL],
+        tools: [buildTool(selected)],
         tool_choice: { type: "tool", name: "submit_analysis" },
         messages: [{ role: "user", content: userContent }]
       })
@@ -277,7 +288,7 @@ export default async function handler(req, res) {
     if (!response.ok) {
       const detail = await response.text();
       return res.status(502).json({
-        error: "[v8] The AI service returned an error: " + detail.slice(0, 400)
+        error: "[v11] The AI service returned an error: " + detail.slice(0, 400)
       });
     }
 
@@ -288,7 +299,7 @@ export default async function handler(req, res) {
     // (often an empty shell). Catch this first and say so plainly.
     if (stopReason === "max_tokens") {
       return res.status(502).json({
-        error: "[v9] The critique ran past the length limit and was cut off. Tick fewer stakeholder voices, or use a shorter report."
+        error: "[v11] The critique ran past the length limit and was cut off. Tick fewer stakeholder voices, or use a shorter report."
       });
     }
 
@@ -296,23 +307,23 @@ export default async function handler(req, res) {
     const parsed = toolBlock ? toolBlock.input : null;
 
     if (!parsed || typeof parsed !== "object") {
-      return res.status(502).json({ error: "[v9] The AI did not return a structured result. Please try again." });
+      return res.status(502).json({ error: "[v11] The AI did not return a structured result. Please try again." });
     }
 
     const result = {
       overallSummary: typeof parsed.overallSummary === "string" ? parsed.overallSummary : "",
-      lenses: normalizeLenses(parsed.lenses),
+      lenses: groupFindings(parsed.findings, selected),
       truncated: truncated
     };
 
     if (!result.lenses.length) {
       // Report exactly what came back, so the cause is never a guess.
-      const raw = parsed.lenses;
+      const raw = parsed.findings;
       const shape = Array.isArray(raw) ? "array[" + raw.length + "]" : typeof raw;
       let sample = "";
       try { sample = JSON.stringify(raw).slice(0, 220); } catch (e) { sample = "(unserializable)"; }
       return res.status(502).json({
-        error: "[v10] The AI returned no usable stakeholder lenses. (stop=" + stopReason +
+        error: "[v11] The AI returned no usable findings. (stop=" + stopReason +
                "; shape=" + shape + "; sample=" + sample + ")"
       });
     }
@@ -320,7 +331,7 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
   } catch (err) {
     return res.status(500).json({
-      error: "[v8] Something went wrong contacting the AI service: " + String(err).slice(0, 300)
+      error: "[v11] Something went wrong contacting the AI service: " + String(err).slice(0, 300)
     });
   }
 }
