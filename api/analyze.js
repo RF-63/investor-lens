@@ -12,8 +12,10 @@
 
 // ---- Settings you can safely change later -------------------------------
 const MODEL = "claude-sonnet-5";      // swap to "claude-opus-4-8" for deeper (pricier) analysis
-const MAX_OUTPUT_TOKENS = 16000;      // length of the critique Claude can produce
+const MAX_OUTPUT_TOKENS = 32000;      // preferred budget for the critique
+const SAFE_OUTPUT_TOKENS = 16000;     // known-good fallback if the model rejects the bigger budget
 const MAX_INPUT_CHARS = 300000;       // protects you from runaway cost on huge reports
+const MAX_POINTS = 8;                 // points per side, per voice (6 when 5+ voices are ticked)
 // -------------------------------------------------------------------------
 
 const LENSES = [
@@ -66,9 +68,9 @@ function buildSystemPrompt(selected) {
 
   const names = selected.map((l) => `"${l.name}"`).join(", ");
 
-  // The more voices are ticked, the fewer points each may make — otherwise the
-  // combined answer overruns the output limit and gets cut off mid-structure.
-  const maxPoints = selected.length >= 5 ? 3 : selected.length === 4 ? 4 : 5;
+  // Ease off slightly only when many voices are ticked, so the combined answer
+  // still fits comfortably even on the fallback budget.
+  const maxPoints = selected.length >= 5 ? 6 : MAX_POINTS;
 
   return `You are a panel of stakeholder voices reviewing a company's annual report or sustainability report. Each voice produces a candid, evidence-based critique — the kind of frank assessment given behind closed doors, not a marketing summary. Be specific, sceptical of management spin, and always ground each point in the document itself.
 
@@ -77,8 +79,8 @@ You reason from the following distinct lenses. For EACH lens, produce points of 
 ${lensBlocks}
 
 RULES:
-- Report ONLY the most material points: at most ${maxPoints} items of praise and at most ${maxPoints} items of criticism per lens. This limit is strict. Prioritize significance over completeness — a few sharp, high-impact points beat many minor ones.
-- Be economical: this critique must fit within a limited response budget. Never sacrifice completing all ${selected.length} lenses in order to elaborate on an earlier one.
+- Give up to ${maxPoints} items of praise and up to ${maxPoints} items of criticism per lens. Be substantive: where the report genuinely supports it, work toward the upper end rather than stopping at two or three. But never pad — drop a point rather than make a weak one.
+- Cover all ${selected.length} lenses. Never exhaust the response elaborating on an early lens and leave a later one thin.
 - Every point MUST include a short verbatim quote from the provided report text that the point responds to. Keep each quote to a single sentence, roughly 30 words maximum; if the relevant passage is longer, quote only the key clause. Quote exactly; do not paraphrase inside the quote field. If you genuinely cannot find supporting text for a point, omit that point.
 - Keep each "point" to 1-2 sentences. Keep "overallSummary" to 2-3 sentences, and make it note the sharpest tension BETWEEN the stakeholder voices where one exists.
 - Be concrete. Prefer "operating margin narrative omits the 220bp decline shown in the segment table" over generic statements.
@@ -267,8 +269,9 @@ export default async function handler(req, res) {
     (companyName ? `Company: ${companyName}\n\n` : "") +
     `Here is the report text to analyze:\n\n"""\n${text}\n"""`;
 
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+  // Ask Claude once, at a given response budget.
+  const callClaude = (maxTokens) =>
+    fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -277,7 +280,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: MAX_OUTPUT_TOKENS,
+        max_tokens: maxTokens,
         system: buildSystemPrompt(selected),
         tools: [buildTool(selected)],
         tool_choice: { type: "tool", name: "submit_analysis" },
@@ -285,11 +288,27 @@ export default async function handler(req, res) {
       })
     });
 
+  try {
+    // Try the generous budget. If this model won't allow one that large, it
+    // says so — in which case quietly retry at the known-good size rather
+    // than failing in the user's face. // v12-depth
+    let response = await callClaude(MAX_OUTPUT_TOKENS);
+
     if (!response.ok) {
       const detail = await response.text();
-      return res.status(502).json({
-        error: "[v11] The AI service returned an error: " + detail.slice(0, 400)
-      });
+      if (/max_tokens/i.test(detail)) {
+        response = await callClaude(SAFE_OUTPUT_TOKENS);
+        if (!response.ok) {
+          const detail2 = await response.text();
+          return res.status(502).json({
+            error: "[v12] The AI service returned an error: " + detail2.slice(0, 400)
+          });
+        }
+      } else {
+        return res.status(502).json({
+          error: "[v12] The AI service returned an error: " + detail.slice(0, 400)
+        });
+      }
     }
 
     const data = await response.json();
