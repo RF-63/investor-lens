@@ -66,6 +66,10 @@ function buildSystemPrompt(selected) {
 
   const names = selected.map((l) => `"${l.name}"`).join(", ");
 
+  // The more voices are ticked, the fewer points each may make — otherwise the
+  // combined answer overruns the output limit and gets cut off mid-structure.
+  const maxPoints = selected.length >= 5 ? 3 : selected.length === 4 ? 4 : 5;
+
   return `You are a panel of stakeholder voices reviewing a company's annual report or sustainability report. Each voice produces a candid, evidence-based critique — the kind of frank assessment given behind closed doors, not a marketing summary. Be specific, sceptical of management spin, and always ground each point in the document itself.
 
 You reason from the following distinct lenses. For EACH lens, produce points of PRAISE and points of CRITICISM, strictly from that stakeholder's point of view and priorities. Do not blur the voices together: what an investor praises, a campaigner may well criticise, and that tension is the point.
@@ -73,7 +77,8 @@ You reason from the following distinct lenses. For EACH lens, produce points of 
 ${lensBlocks}
 
 RULES:
-- Report ONLY the most material points: at most 5 items of praise and at most 5 items of criticism per lens. Prioritize significance over completeness — a few sharp, high-impact points beat many minor ones.
+- Report ONLY the most material points: at most ${maxPoints} items of praise and at most ${maxPoints} items of criticism per lens. This limit is strict. Prioritize significance over completeness — a few sharp, high-impact points beat many minor ones.
+- Be economical: this critique must fit within a limited response budget. Never sacrifice completing all ${selected.length} lenses in order to elaborate on an earlier one.
 - Every point MUST include a short verbatim quote from the provided report text that the point responds to. Keep each quote to a single sentence, roughly 30 words maximum; if the relevant passage is longer, quote only the key clause. Quote exactly; do not paraphrase inside the quote field. If you genuinely cannot find supporting text for a point, omit that point.
 - Keep each "point" to 1-2 sentences. Keep "overallSummary" to 2-3 sentences, and make it note the sharpest tension BETWEEN the stakeholder voices where one exists.
 - Be concrete. Prefer "operating margin narrative omits the 220bp decline shown in the segment table" over generic statements.
@@ -85,7 +90,7 @@ Provide your analysis by calling the "submit_analysis" tool. Include all ${selec
 }
 
 // The tool defines the exact structure Claude must return. Because the API
-// enforces this schema, the result is always well-formed data. // v8-lenses
+// enforces this schema, the result is always well-formed data. // v9-budget
 const ANALYSIS_TOOL = {
   name: "submit_analysis",
   description: "Submit the structured stakeholder critique of the report.",
@@ -236,16 +241,19 @@ export default async function handler(req, res) {
     const data = await response.json();
     const stopReason = data.stop_reason;
 
+    // If the answer hit the length limit, the structured result is incomplete
+    // (often an empty shell). Catch this first and say so plainly.
+    if (stopReason === "max_tokens") {
+      return res.status(502).json({
+        error: "[v9] The critique ran past the length limit and was cut off. Tick fewer stakeholder voices, or use a shorter report."
+      });
+    }
+
     const toolBlock = (data.content || []).find((c) => c.type === "tool_use");
     const parsed = toolBlock ? toolBlock.input : null;
 
     if (!parsed || typeof parsed !== "object") {
-      if (stopReason === "max_tokens") {
-        return res.status(502).json({
-          error: "[v8] The critique exceeded the length limit. Try fewer lenses, or a shorter report."
-        });
-      }
-      return res.status(502).json({ error: "[v8] The AI did not return a structured result. Please try again." });
+      return res.status(502).json({ error: "[v9] The AI did not return a structured result. Please try again." });
     }
 
     const result = {
@@ -255,7 +263,11 @@ export default async function handler(req, res) {
     };
 
     if (!result.lenses.length) {
-      return res.status(502).json({ error: "[v8] The AI returned no stakeholder lenses. Please try again." });
+      // Report exactly what came back, so the cause is never a guess.
+      return res.status(502).json({
+        error: "[v9] The AI returned no stakeholder lenses. (stop=" + stopReason +
+               "; keys=" + Object.keys(parsed).join("|") + ")"
+      });
     }
 
     return res.status(200).json(result);
